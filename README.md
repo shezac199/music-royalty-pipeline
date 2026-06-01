@@ -1,6 +1,6 @@
 # Royalty Processing & Music Analytics Platform
 
-> A cloud-native hybrid batch + streaming pipeline that calculates music royalties accurately across millions of streaming events from Spotify and YouTube — combining real-time event processing with batch reconciliation to ensure distributors and artists get paid correctly.
+> A cloud-native hybrid batch + streaming pipeline that calculates music royalties accurately across millions of streaming events from YouTube and Last.fm — combining real-time event processing with batch reconciliation to ensure distributors and artists get paid correctly.
 
 ---
 
@@ -9,8 +9,8 @@
 Music distributors need to calculate royalties accurately across millions of streaming events from multiple platforms and territories. A single late-arriving event, duplicate play, or bad record can mean incorrect payments to artists and labels.
 
 This platform solves that by:
-- Ingesting real track and artist metadata from Spotify and YouTube APIs
-- Simulating high-volume play events at scale against real track catalogues
+- Ingesting real track and artist metadata from MusicBrainz, Last.fm, and YouTube APIs
+- Simulating high-volume play events at scale against real track catalogues and ISRC codes
 - Processing events in real time with deduplication and late-data handling
 - Reconciling via batch jobs to correct any streaming-layer errors
 - Producing royalty payout tables at the Gold layer, broken down by platform and territory
@@ -29,23 +29,26 @@ This platform solves that by:
 
 ### 1. Source Systems
 
-| Source | Type | What We Fetch |
-|---|---|---|
-| Spotify API | Batch | Track metadata, artist info, genres, popularity |
-| YouTube Data API | Batch | Video metadata, view counts, channel info |
-| MusicBrainz | Batch | Label info, release territories, artist data |
-| Last.fm API | Batch | Historical play counts, tags, similar artists |
+| Source | Type | What We Fetch | Auth Required |
+|---|---|---|---|
+| MusicBrainz API | Batch | Track metadata, ISRC codes, label, release territories | None |
+| Last.fm API | Batch | Trending tracks, play counts, artist tags | Free API key |
+| YouTube Data API | Batch | Video metadata, view counts, channel info | Free API key |
 
-The event generator pulls real track IDs and artist names from Spotify before simulating play events — so Kafka processes real catalogue data, not made-up IDs.
+**Why this stack over Spotify:**
+Spotify's API now requires a Premium subscription even for personal projects (Feb 2026 policy change). MusicBrainz is a better fit anyway — it provides ISRC codes, which are the actual industry-standard identifiers used in real royalty systems. Last.fm provides real trend and popularity data to seed the event generator meaningfully.
+
+The event generator pulls real track IDs and ISRC codes from MusicBrainz and trending tracks from Last.fm before simulating play events — so Kafka processes real catalogue data, not made-up IDs.
 
 ---
 
 ### 2. Streaming Event Generation
 
 Python-based event producer that:
-1. Fetches real trending tracks from Spotify API
-2. Simulates play/view events against those real track IDs at scale
-3. Pushes events continuously into Kafka
+1. Fetches real trending tracks from Last.fm API
+2. Enriches those tracks with ISRC codes and territory data from MusicBrainz
+3. Simulates play/view events against those real tracks at scale
+4. Pushes events continuously into Kafka
 
 Example event:
 
@@ -53,15 +56,17 @@ Example event:
 {
   "event_id": "uuid",
   "track_id": "5Z01UMMf7V1o0MzF86s6WJ",
+  "isrc": "GBAHS1600463",
   "track_name": "Blinding Lights",
   "artist": "The Weeknd",
-  "platform": "SPOTIFY",
+  "label": "Republic Records",
+  "platform": "YOUTUBE",
   "territory": "US",
   "event_time": "2026-05-21T10:00:00Z"
 }
 ```
 
-> Events are simulated at scale — this mirrors how a proper load-test environment works in production.
+> Events are simulated at scale — this mirrors how a proper load-test environment works in production. The catalogue data (track IDs, ISRC codes, territories, labels) is real.
 
 ---
 
@@ -124,7 +129,7 @@ s3://music-analytics/
 
 #### Silver Layer
 - Schema standardisation
-- Metadata enrichment (join events with track/artist data)
+- Metadata enrichment (join events with track/artist/ISRC data)
 - Deduplication
 - **Data quality validation** (see below)
 
@@ -141,19 +146,20 @@ Explicit validation step before any data reaches Silver:
 
 | Check | Rule |
 |---|---|
-| Null check | `track_id`, `event_id`, `event_time` must not be null |
+| Null check | `track_id`, `isrc`, `event_id`, `event_time` must not be null |
 | Duplicate detection | Deduplicate on `event_id` within watermark window |
 | Timestamp validation | `event_time` must not be in the future |
 | Territory validation | `territory` must be a valid ISO country code |
-| Platform validation | `platform` must be one of: SPOTIFY, YOUTUBE |
+| Platform validation | `platform` must be one of: YOUTUBE, LASTFM |
+| ISRC format check | Must match standard format: `[A-Z]{2}[A-Z0-9]{3}[0-9]{7}` |
 
-Implemented using Spark assertions. Records that fail are written to a `quarantine/` path for investigation — not silently dropped.
+Records that fail validation are written to a `quarantine/` path for investigation — not silently dropped.
 
 ---
 
 ### 7. Batch Processing — Spark Batch Jobs (AWS Glue)
 
-Runs after streaming layer to ensure correctness.
+Runs after the streaming layer to ensure correctness.
 
 Responsibilities:
 - Incremental processing of Silver → Gold
@@ -176,8 +182,8 @@ royalty = plays × rate_per_stream × territory_multiplier × platform_weight
 
 | Platform | Base Rate (USD/stream) |
 |---|---|
-| Spotify | $0.004 |
 | YouTube | $0.001 |
+| Last.fm equivalent | $0.003 |
 
 **Territory multipliers:**
 
@@ -188,7 +194,9 @@ royalty = plays × rate_per_stream × territory_multiplier × platform_weight
 | EU | 0.8 |
 | IN | 0.3 |
 
-**Output:** Gold layer `royalty_payouts` table, partitioned by `artist_id`, `platform`, `territory`, `reporting_month`.
+**Output:** Gold layer `royalty_payouts` table, partitioned by `isrc`, `artist_id`, `platform`, `territory`, `reporting_month`.
+
+> Using ISRC as the primary royalty identifier mirrors real-world royalty systems used by distributors like DistroKid, TuneCore, and PROs (Performing Rights Organisations).
 
 ---
 
@@ -196,8 +204,8 @@ royalty = plays × rate_per_stream × territory_multiplier × platform_weight
 
 Gold layer outputs consumed downstream:
 
-- Monthly royalty statements per artist
-- Platform comparison metrics (Spotify vs YouTube)
+- Monthly royalty statements per artist, keyed by ISRC
+- Platform comparison metrics (YouTube vs Last.fm)
 - Territory-level payout reports
 - Daily usage trend tables
 
@@ -213,7 +221,9 @@ Gold layer outputs consumed downstream:
 | Delta Lake | ACID lakehouse on S3 |
 | Spark Batch | Batch transforms and royalty calc via AWS Glue |
 | Python | Event generation and API ingestion |
-| MusicBrainz / Last.fm | Free enrichment data |
+| MusicBrainz | Free track metadata and ISRC codes (no auth needed) |
+| Last.fm | Free trending track and play count data |
+| YouTube Data API | Free video and channel metadata |
 | AWS Lambda | Scheduled API polling trigger (free tier) |
 
 ---
@@ -224,7 +234,9 @@ Gold layer outputs consumed downstream:
 - Python 3.9+
 - AWS account (free tier)
 - Confluent Cloud account (free tier)
-- Spotify Developer account (free)
+- Last.fm Developer account (free API key)
+- YouTube Data API key (free)
+- MusicBrainz requires no account or key
 
 ### Setup
 
@@ -233,7 +245,7 @@ git clone https://github.com/shezac199/music-analytics-platform
 cd music-analytics-platform
 pip install -r requirements.txt
 cp .env.example .env
-# Fill in your API keys and Kafka bootstrap server in .env
+# Fill in your Last.fm and YouTube API keys, and Kafka bootstrap server in .env
 ```
 
 ### Run the event producer
@@ -267,7 +279,8 @@ python batch_jobs/royalty_calculator.py
 - Exactly-once semantics
 - Batch reconciliation for correctness
 - Data quality validation with quarantine pattern
-- Royalty calculation with territory and platform weighting
+- ISRC-based royalty calculation with territory and platform weighting
+- Rate limiting and API backoff strategies (MusicBrainz 1 req/sec constraint)
 - Cloud-native storage on AWS free tier
 
 ---
@@ -275,6 +288,7 @@ python batch_jobs/royalty_calculator.py
 ## Architectural Decisions
 
 See [`docs/decisions.md`](docs/decisions.md) for documented trade-offs including:
+- Why MusicBrainz + Last.fm over Spotify
 - Why Confluent Cloud over self-hosted Kafka
 - Why Delta Lake over plain Parquet
 - Why micro-batch over true streaming
@@ -286,8 +300,8 @@ See [`docs/decisions.md`](docs/decisions.md) for documented trade-offs including
 
 ```
 music-analytics-platform/
-├── producer/               # Event generator (Spotify-seeded)
-├── metadata_ingestion/     # Spotify, YouTube, MusicBrainz ingestion
+├── producer/               # Event generator (Last.fm + MusicBrainz seeded)
+├── metadata_ingestion/     # MusicBrainz, Last.fm, YouTube ingestion
 ├── streaming_jobs/         # Spark Structured Streaming on Glue
 ├── batch_jobs/             # Spark batch + royalty calculation
 ├── datasets/               # Sample data and schemas

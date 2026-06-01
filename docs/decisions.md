@@ -4,7 +4,27 @@
 
 ---
 
-## ADR-001: Confluent Cloud over Self-Hosted Kafka
+## ADR-001: MusicBrainz + Last.fm over Spotify
+
+**Decision:** Use MusicBrainz and Last.fm as the primary metadata sources instead of the Spotify API.
+
+**Rejected alternative:** Spotify Web API.
+
+**Reasoning:**
+In February 2026, Spotify changed its Developer Mode policy to require a Premium subscription for all API access, even for personal and non-commercial projects. This makes it unsuitable for a zero-cost project.
+
+More importantly, MusicBrainz is a better fit for a royalty processing pipeline specifically:
+- It provides ISRC codes (International Standard Recording Codes), which are the actual identifiers used in real-world royalty systems by distributors like DistroKid and TuneCore, and by Performing Rights Organisations (PROs)
+- It has over 1 million artists and 25 million recordings, requires no authentication, and is completely free
+- Last.fm provides real trending track data and play counts, which makes the event generator more realistic than any simulated data Spotify could have provided
+
+The pivot away from Spotify is documented here as an engineering decision, not a workaround. Using ISRC as the royalty key is more production-accurate than using Spotify's proprietary track IDs.
+
+**Trade-off accepted:** MusicBrainz rate-limits to 1 request per second per IP. This required building a rate limiter with exponential backoff into the ingestion layer — which is itself a useful engineering pattern to demonstrate.
+
+---
+
+## ADR-002: Confluent Cloud over Self-Hosted Kafka
 
 **Decision:** Use Confluent Cloud free tier instead of running Kafka on EC2.
 
@@ -17,7 +37,7 @@ A t2.micro has 1GB RAM. Kafka alone needs 4–6GB to run stably. Running it on f
 
 ---
 
-## ADR-002: Delta Lake over Plain Parquet
+## ADR-003: Delta Lake over Plain Parquet
 
 **Decision:** Use Delta Lake on S3 for all storage layers.
 
@@ -30,7 +50,7 @@ Royalty calculation requires correctness. Plain Parquet has no ACID guarantees �
 
 ---
 
-## ADR-003: Micro-Batch over True Streaming
+## ADR-004: Micro-Batch over True Streaming
 
 **Decision:** Use Spark Structured Streaming in micro-batch mode rather than continuous processing mode.
 
@@ -43,7 +63,7 @@ Music royalty calculations don't require millisecond latency. A few minutes of l
 
 ---
 
-## ADR-004: Watermark Threshold of 10 Minutes
+## ADR-005: Watermark Threshold of 10 Minutes
 
 **Decision:** Set the watermark for late-arriving events to 10 minutes.
 
@@ -56,7 +76,7 @@ The event generator pushes events with `event_time` as close to real time as pos
 
 ---
 
-## ADR-005: SCD Type 2 on Artist Dimension Only
+## ADR-006: SCD Type 2 on Artist Dimension Only
 
 **Decision:** Implement SCD Type 2 for the artist dimension table only.
 
@@ -69,7 +89,7 @@ SCD Type 2 tracks historical changes with effective date ranges. Artists do chan
 
 ---
 
-## ADR-006: AWS Glue over Self-Managed Spark
+## ADR-007: AWS Glue over Self-Managed Spark
 
 **Decision:** Use AWS Glue for both streaming and batch Spark jobs.
 
@@ -79,3 +99,16 @@ SCD Type 2 tracks historical changes with effective date ranges. Artists do chan
 AWS Glue is serverless — no cluster to manage, no memory tuning for EC2 instances, no cost when not running. It natively supports Spark and Delta Lake. The free tier gives 1 million DPU seconds per month, which is more than enough for a personal project. Running self-managed Spark on a t2.micro would require constant babysitting. In real companies, managed Spark (Glue, Databricks, EMR Serverless) is standard. Using Glue is both the practical and the production-realistic choice.
 
 **Trade-off accepted:** Less flexibility in Spark configuration. Not a concern at this scale.
+
+---
+
+## ADR-008: Quarantine Pattern over Silent Drops for Bad Data
+
+**Decision:** Write records that fail data quality checks to a `quarantine/` path rather than dropping them.
+
+**Rejected alternative:** Silently filter out bad records in the Silver layer.
+
+**Reasoning:**
+In a royalty pipeline, a silently dropped record means an artist doesn't get paid for a play. That's a real business problem. The quarantine pattern ensures every record is accounted for — either it passed validation and moved to Silver, or it failed and sits in quarantine for investigation and potential reprocessing. This also makes debugging much easier: you can always look at quarantine to understand why data didn't make it through, rather than wondering where it went.
+
+**Trade-off accepted:** Slightly more storage used for quarantine data. Completely worth it for auditability.
