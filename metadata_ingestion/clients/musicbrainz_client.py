@@ -25,10 +25,31 @@ class MusicBrainzClient:
 
         return response.json()
     
+    def get_artist_metadata(self, artist_name: str):
+
+        response = self.search_artist(artist_name)
+
+        artists = response.get("artists", [])
+
+        if not artists:
+            raise ValueError(f"No artist found with name: {artist_name}")
+        
+        artist = artists[0]
+
+        return {
+        "artist_id": artist.get("id"),
+        "artist_name": artist.get("name"),
+        "country": artist.get("country"),
+        "artist_type": artist.get("type")
+    }
+        
+    
 if __name__ == "__main__":
 
     client = MusicBrainzClient()
 
-    result = client.search_artist("Ed Sheeran")
+    artist = client.get_artist_metadata(
+        "Ed Sheeran"
+    )
 
-    print(result)
+    print(artist)
