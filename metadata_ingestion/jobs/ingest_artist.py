@@ -1,47 +1,49 @@
 import json
 from pathlib import Path
 import time
+import logging
+import pandas as pd
 
 from metadata_ingestion.clients.musicbrainz_client import MusicBrainzClient
 
-artists = [
-    "Ed Sheeran",
-    "Taylor Swift",
-    "Coldplay",
-    "Adele",
-    "Drake"
-]
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s"
+)
+log = logging.getLogger(__name__)
 
-client = MusicBrainzClient()
+OUTPUT_DIR = Path(__file__).parent.parent / "output"
+OUTPUT_FILE = OUTPUT_DIR / "artist_metadata.json"
 
-artist_metadata = []
-
-for artist in artists:
-    metadata = client.get_artist_metadata(artist)
-    artist_metadata.append(metadata)
-    print(f"Fetched metadata for: {artist}")
-    time.sleep(1)  # Wait 1 second between requests to avoid rate limiting
-
-output_dir = Path("metadata_ingestion/output/raw_metadata")
-
-output_dir.mkdir(
-    parents=True,
-    exist_ok=True
+artists_df = pd.read_csv(
+    "metadata_ingestion/input/artist_seed.csv"
 )
 
-output_file = output_dir / "artists_metadata.json"
-with open(
-    output_file,
-    "w",
-    encoding="utf-8"
-) as file:
+def run():
+    client = MusicBrainzClient()
 
-    json.dump(
-        artist_metadata,
-        file,
-        indent=4
-    )
+    artist_metadata = []
+    failed = []
+    total_artists = len(artists_df)
 
-print(
-    f"Saved {len(artist_metadata)} artists to {output_file}"
-)
+    for i, artist_name in enumerate(artists_df["artist_name"], start = 1):
+        log.info(f"[{i}/{total_artists}] Fetching metadata for: {artist_name}")
+
+        try:
+            metadata = client.get_artist_metadata(artist_name)
+            artist_metadata.append(metadata)
+            log.info(f"  Done: {metadata['artist_name']} | {metadata['country']} | genres: {metadata['genres'][:3]}")
+        
+        except Exception as e:
+            log.warning(f"  Failed for {artist_name}: {e}")
+            failed.append(artist_name)
+            continue
+            
+        time.sleep(2) 
+
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+        json.dump(artist_metadata, f, indent=4, ensure_ascii=False)
+
+if __name__ == '__main__':
+    run()

@@ -17,7 +17,7 @@ class MusicBrainzClient:
             timeout=30
         )
         response.raise_for_status()
-        time.sleep(1) 
+        time.sleep(2) 
         return response.json()
 
     def search_artist(self, artist_name: str) -> dict:
@@ -29,14 +29,39 @@ class MusicBrainzClient:
 
         if not artists:
             raise ValueError(f"No artist found with name: {artist_name}")
+        
+        mbid = artists[0].get("id")
 
-        artist = artists[0]
+        data = self._get(
+            f"artist/{mbid}",
+            {
+                "inc": "aliases+genres+tags+ratings+url-rels",
+                "fmt": "json"
+            }
+        )
+
+        genres = [g.get("name") for g in data.get("genres", [])]
+        tags = [t.get("name") for t in data.get("tags", [])]
+        rating_data = data.get("rating", {})
+        lifespan = data.get("life-span", {})
+        area = data.get("area", {}).get("name")
 
         return {
-            "artist_id": artist.get("id"),
-            "artist_name": artist.get("name"),
-            "country": artist.get("country"),
-            "artist_type": artist.get("type")
+            "artist_id": data.get("id"),
+            "artist_name": data.get("name"),
+            "sort_name": data.get("sort-name"),
+            "country": data.get("country"),
+            "area": area,
+            "artist_type": data.get("type"),
+            "gender": data.get("gender"),
+            "disambiguation": data.get("disambiguation"),
+            "begin_date": lifespan.get("begin"),
+            "end_date": lifespan.get("end"),
+            "active": not lifespan.get("ended", False),
+            "genres": genres,
+            "tags": tags,
+            "rating": rating_data.get("value"),
+            "rating_count": rating_data.get("votes-count")
         }
 
     def get_releases_for_artist(self, artist_mbid: str, limit: int = 5) -> list:
@@ -52,11 +77,15 @@ class MusicBrainzClient:
             {
                 "artist": artist_mbid,
                 "fmt": "json",
-                "limit": limit
+                "limit": limit,
+                "status": "official",
+                "type": "album|single"
             }
         )
 
         releases = data.get("releases", [])
+
+        releases = sorted(releases, key=lambda x: x.get("date") or "0", reverse=True)
 
         return [
             {
@@ -65,7 +94,7 @@ class MusicBrainzClient:
                 "release_date": r.get("date"),
                 "country": r.get("country")
             }
-            for r in releases
+            for r in releases[:limit]
         ]
 
     def get_tracks_for_release(self, release_mbid: str) -> list:
@@ -74,7 +103,8 @@ class MusicBrainzClient:
         Uses inc=recordings+isrcs to get both in a single API call.
 
         Returns a flat list of track dicts, each containing the ISRC.
-        Not all tracks have ISRCs — we skip those cleanly.
+        Some tracks may not have ISRC codes available.
+        In those cases the ISRC field is generated as a synthetic value.
         """
         data = self._get(
             f"release/{release_mbid}",
@@ -94,38 +124,19 @@ class MusicBrainzClient:
                 isrcs = recording.get("isrcs", [])
 
                 # skip tracks with no ISRC — not useful for royalty calc
-                if not isrcs:
-                    continue
+                #if not isrcs:
+                    #continue
 
                 tracks.append({
                     "track_id": recording.get("id"),
                     "title": recording.get("title") or track.get("title"),
                     "duration_ms": recording.get("length"),
-                    "isrc": isrcs[0],  # take primary ISRC
+                    "isrc": isrcs[0] if isrcs else f"ZZMB-{recording.get('id', '')[:10].upper()}",  #synthetic ISRCs
                     "release_id": release_mbid,
                     "release_title": release_title,
                     "release_date": release_date,
                     "track_position": track.get("position")
                 })
+        print(f"Found {len(tracks)} tracks for release: {release_title}")
 
         return tracks
-
-
-if __name__ == "__main__":
-    client = MusicBrainzClient()
-
-    # get artist
-    artist = client.get_artist_metadata("Ed Sheeran")
-    print("Artist:", artist)
-
-    # get releases for that artist
-    releases = client.get_releases_for_artist(artist["artist_id"], limit=3)
-    print(f"\nFound {len(releases)} releases")
-
-    # get tracks + ISRCs for the first release
-    if releases:
-        first_release = releases[0]
-        print(f"\nFetching tracks for: {first_release['release_title']}")
-        tracks = client.get_tracks_for_release(first_release["release_id"])
-        for t in tracks:
-            print(f"  {t['title']} | ISRC: {t['isrc']}")
